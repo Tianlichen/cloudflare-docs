@@ -1,93 +1,82 @@
----
-title: Cloudflare Workflows
-order: 0
-type: overview
-pcx_content_type: overview
-sidebar:
-  order: 1
-head:
-  - tag: title
-    content: Overview
----
+name: Auto Update Worker
 
-import { CardGrid, Description, Feature, LinkTitleCard, Plan, RelatedProduct } from "~/components"
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 1 * * *" # 每天凌晨1点运行
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: '是否强制更新（忽略版本检查）'
+        required: false
+        default: 'false'
 
-<Description>
+permissions:
+  contents: write
 
-Build durable multi-step applications on Cloudflare Workers with Workflows.
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
 
-</Description>
+      - name: 设置环境
+        run: |
+          echo "REPO_URL=https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases" >> $GITHUB_ENV
+          echo "TARGET_FILE=worker.zip" >> $GITHUB_ENV
 
-<Plan type="workers-all" />
+      - name: 检查并更新 Worker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 使用 GitHub Token 认证
+        run: |
+          # 日志函数
+          log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"; }
 
-Workflows is a durable execution engine built on Cloudflare Workers. Workflows allow you to build multi-step applications that can automatically retry, persist state and run for minutes, hours, days, or weeks. Workflows introduces a programming model that makes it easier to build reliable, long-running tasks, observe as they progress, and programatically trigger instances based on events across your services.
+          log "开始检查更新..."
 
-Refer to the [get started guide](/workflows/get-started/guide/) to start building with Workflows.
+          # 获取本地版本
+          LOCAL_VERSION=$(cat version.txt 2>/dev/null || echo "")
+          log "本地版本: ${LOCAL_VERSION:-无}"
 
-***
+          # 获取最新 Release
+          log "获取最新 Release 信息..."
+          RESPONSE=$(curl -s --retry 3 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
+          if [ $? -ne 0 ]; then
+            log "ERROR: 无法访问 GitHub API"
+            exit 1
+          fi
 
-## Features
+          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name')
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
 
-<Feature header="Deploy your first Workflow" href="/workflows/get-started/guide/" cta="Deploy your first Workflow">
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
+            log "ERROR: 未找到 $TARGET_FILE"
+            exit 1
+          fi
+          log "最新版本: $TAG_NAME"
 
-Define your first Workflow, understand how to compose multi-steps, and deploy to production.
+          # 判断是否需要更新
+          FORCE_UPDATE=${{ github.event.inputs.force_update || 'false' }}
+          if [ "$LOCAL_VERSION" = "$TAG_NAME" ] && [ "$FORCE_UPDATE" != "true" ]; then
+            log "已是最新版本，无需更新"
+            exit 0
+          fi
 
-</Feature>
+          # 下载并更新
+          log "下载 $TARGET_FILE..."
+          wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL"
+          log "解压 $TARGET_FILE..."
+          unzip -o "$TARGET_FILE"
+          rm "$TARGET_FILE"
+          echo "$TAG_NAME" > version.txt
+          log "更新完成，新版本: $TAG_NAME"
 
-<Feature header="Rules of Workflows" href="/workflows/build/rules-of-workflows/" cta="Best practices">
-
-Understand best practices when writing and building applications using Workflows.
-
-</Feature>
-
-<Feature header="Trigger Workflows" href="/workflows/build/trigger-workflows/" cta="Trigger Workflows from Workers">
-
-Learn how to trigger Workflows from your Workers applications, via the REST API, and the command-line.
-
-</Feature>
-
-***
-
-## Related products
-
-<RelatedProduct header="Workers" href="/workers/" product="workers">
-
-Build serverless applications and deploy instantly across the globe for exceptional performance, reliability, and scale.
-
-
-</RelatedProduct>
-
-<RelatedProduct header="Pages" href="/pages/" product="pages">
-
-Deploy dynamic front-end applications in record time.
-
-
-</RelatedProduct>
-
-***
-
-## More resources
-
-<CardGrid>
-
-<LinkTitleCard title="Pricing" href="/workflows/reference/pricing/" icon="seti:shell">
-Learn more about how Workflows is priced.
-</LinkTitleCard>
-
-<LinkTitleCard title="Limits" href="/workflows/reference/limits/" icon="document">
-Learn more about Workflow limits, and how to work within them.
-</LinkTitleCard>
-
-<LinkTitleCard title="Storage options" href="/workers/platform/storage-options/" icon="document">
-Learn more about the storage and database options you can build on with Workers.
-</LinkTitleCard>
-
-<LinkTitleCard title="Developer Discord" href="https://discord.cloudflare.com" icon="discord">
-Connect with the Workers community on Discord to ask questions, show what you are building, and discuss the platform with other developers.
-</LinkTitleCard>
-
-<LinkTitleCard title="@CloudflareDev" href="https://x.com/cloudflaredev" icon="x.com">
-Follow @CloudflareDev on Twitter to learn about product announcements, and what is new in Cloudflare Developer Platform.
-</LinkTitleCard>
-
-</CardGrid>
+      - name: 提交更改
+        if: success() # 仅在更新成功时提交
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🔄 自动同步 Worker 版本: ${{ steps.check_update.outputs.tag_name || '未知' }}"
+          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
